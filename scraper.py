@@ -385,12 +385,15 @@ def update_dated_pair_sheet(ws, page, title, brand, name_col, code_col, start_ro
     # Dynamic column detection from Row 2 headers
     actual_name_col = name_col
     actual_code_col = code_col
+    actual_link_col = None
     for col_idx in range(1, min(ws.max_column + 1, 10)):
         hdr = str(ws.cell(row=2, column=col_idx).value or "").strip().lower()
         if any(k in hdr for k in ["store address", "outlet name", "address", "outlet"]):
             actual_name_col = col_idx
-        elif any(k in hdr for k in ["store code", "code"]) and "brand" not in hdr:
+        elif any(k in hdr for k in ["store code", "code"]) and "brand" not in hdr and "pair" not in hdr:
             actual_code_col = col_idx
+        elif any(k in hdr for k in ["link", "url"]):
+            actual_link_col = col_idx
 
     # Find today's column pair by scanning every column from col 5 onwards
     rate_col, rev_col = None, None
@@ -435,6 +438,9 @@ def update_dated_pair_sheet(ws, page, title, brand, name_col, code_col, start_ro
         sno = ws.cell(row=r, column=1).value
         code = str(ws.cell(row=r, column=actual_code_col).value or "").strip() if actual_code_col else ""
         name = str(ws.cell(row=r, column=actual_name_col).value or "").strip()
+        row_link = str(ws.cell(row=r, column=actual_link_col).value or "").strip() if actual_link_col else None
+        if not row_link:
+            row_link = None
 
         if not name:
             continue
@@ -466,7 +472,7 @@ def update_dated_pair_sheet(ws, page, title, brand, name_col, code_col, start_ro
         else:
             # Always ignore cluster/index codes so every outlet uses its unique store name
             ignore_code = True
-            res = scrape_store(page, code or f"#{sno}", store_brand, name, ignore_store_code=ignore_code)
+            res = scrape_store(page, code or f"#{sno}", store_brand, name, direct_url=row_link, ignore_store_code=ignore_code)
             res["sno"] = sno
 
         results.append(res)
@@ -555,7 +561,7 @@ def main():
             ws_comp = wb[comp_sheet_name]
             res_comp = update_dated_pair_sheet(
                 ws_comp, page, comp_sheet_name, brand="Auto",
-                name_col=4, code_col=3, start_row=3, end_row=4 if test_mode else None, all_results=all_results, test_mode=test_mode
+                name_col=5, code_col=4, start_row=3, end_row=4 if test_mode else None, all_results=all_results, test_mode=test_mode
             )
             safe_save_workbook(wb, EXCEL_PATH)
             cat_summaries["Competitors Comparison"] = {"total": len(res_comp), "results": res_comp}
