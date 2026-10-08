@@ -7,8 +7,10 @@ import random
 import calendar
 import urllib.parse
 import urllib.request
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment
@@ -448,8 +450,11 @@ def update_dated_pair_sheet(ws, page, title, brand, name_col, code_col, start_ro
         # Special closed check for India BV Row 81 S.No 79 or '(Closed)' in name
         is_explicit_closed = "(closed)" in name.lower() or (title == "India BV" and str(sno) == "79")
 
-        store_brand = brand
-        if brand == "Auto":
+        # Dynamic brand detection from Column C or header
+        row_brand = str(ws.cell(row=r, column=3).value or "").strip()
+        if row_brand and "brand" not in row_brand.lower():
+            store_brand = row_brand
+        else:
             store_brand = "Haldiram" if name.upper().startswith("HR") else ("Om Sweets" if name.upper().startswith(("OM", "OM,")) else "Bikanervala")
 
         print(f"[{sno}] {name}")
@@ -474,6 +479,7 @@ def update_dated_pair_sheet(ws, page, title, brand, name_col, code_col, start_ro
             ignore_code = True
             res = scrape_store(page, code or f"#{sno}", store_brand, name, direct_url=row_link, ignore_store_code=ignore_code)
             res["sno"] = sno
+            res["brand"] = store_brand
 
         results.append(res)
         all_results.append(res)
@@ -556,12 +562,12 @@ def main():
             cat_summaries["Bikanervala GGN"] = {"total": len(res_ggn), "results": res_ggn}
 
         # 2. Competitors Sheet
-        comp_sheet_name = next((s for s in ["Competitors", "Comparison Sheet"] if s in wb.sheetnames), None)
+        comp_sheet_name = next((s for s in ["Competitors", "Comparison Sheet", "Gg Comparison Sheet"] if s in wb.sheetnames), None)
         if comp_sheet_name:
             ws_comp = wb[comp_sheet_name]
             res_comp = update_dated_pair_sheet(
                 ws_comp, page, comp_sheet_name, brand="Auto",
-                name_col=5, code_col=4, start_row=3, end_row=4 if test_mode else None, all_results=all_results, test_mode=test_mode
+                name_col=4, code_col=2, start_row=3, end_row=4 if test_mode else None, all_results=all_results, test_mode=test_mode
             )
             safe_save_workbook(wb, EXCEL_PATH)
             cat_summaries["Competitors Comparison"] = {"total": len(res_comp), "results": res_comp}
@@ -606,6 +612,16 @@ def main():
             safe_save_workbook(wb, EXCEL_PATH)
             cat_summaries["OM Sweets India"] = {"total": len(res_om), "results": res_om}
 
+        # 7. Other Outlets (59 competitor stores)
+        if "Other Outlets" in wb.sheetnames:
+            ws_other = wb["Other Outlets"]
+            res_other = update_dated_pair_sheet(
+                ws_other, page, "Other Outlets", brand="Auto",
+                name_col=4, code_col=2, start_row=3, end_row=4 if test_mode else None, all_results=all_results, test_mode=test_mode
+            )
+            safe_save_workbook(wb, EXCEL_PATH)
+            cat_summaries["Other Outlets"] = {"total": len(res_other), "results": res_other}
+
         context.close()
         browser.close()
 
@@ -630,15 +646,19 @@ def main():
     if webhook_url:
         try:
             import requests
-            print("\n[Google Sheets] Syncing live data to Google Sheet...")
+            print(f"\n[Google Sheets] Syncing live data for {today_str} to Google Sheet Webhook...")
             g_payload = {
                 "date": today_str,
                 "categories": {k: v["results"] for k, v in cat_summaries.items() if "results" in v}
             }
             g_res = requests.post(webhook_url, json=g_payload, timeout=90)
-            print(f"[Google Sheets] Sync result: {g_res.text}")
+            print(f"[Google Sheets] HTTP Status: {g_res.status_code}")
+            print(f"[Google Sheets] Response: {g_res.text}")
         except Exception as gs_err:
-            print(f"[Google Sheets warning] Could not sync to Google Sheet: {gs_err}")
+            print(f"[Google Sheets ERROR] Could not sync to Google Sheet: {gs_err}")
+    else:
+        print("\n[Google Sheets WARNING] GOOGLE_SHEET_WEBHOOK_URL secret / environment variable is NOT set!")
+        print("  Google Sheet was NOT updated because GOOGLE_SHEET_WEBHOOK_URL is missing in GitHub Repository Secrets.")
 
     # Automatically send email
     try:
