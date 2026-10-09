@@ -90,13 +90,35 @@ def extract_gmb_data(page, brand="Bikanervala"):
     rating, reviews = None, None
 
     try:
+        # Check inner_text of body first - captures newline-separated badge layout on mobile
+        body_text = ""
+        try:
+            body_text = page.inner_text("body")
+        except Exception:
+            pass
+
+        if body_text:
+            # Pattern: 4.8 \n (1,566)
+            m_text = re.search(r'([1-5]\.\d)\s*\n\s*\(([0-9,]+)\)', body_text)
+            if m_text:
+                rating = float(m_text.group(1))
+                reviews = int(m_text.group(2).replace(",", ""))
+
+            # Pattern: 4.8(1,566) or 4.8 ★ (1,566)
+            if rating is None or reviews is None:
+                m_text2 = re.search(r'([1-5]\.\d)\s*(?:★|stars?)?\s*\(([0-9,]+)\)', body_text)
+                if m_text2:
+                    if rating is None: rating = float(m_text2.group(1))
+                    if reviews is None: reviews = int(m_text2.group(2).replace(",", ""))
+
         html = page.content()
 
         # Method 1: Combined aria-label like '4.2 stars 765 Reviews' or '3.9 stars 3,843 reviews'
-        m_comb = re.search(r'aria-label="([\d.]+)\s*stars?\s*([\d,]+)\s*reviews?"', html, re.I)
-        if m_comb:
-            rating = float(m_comb.group(1))
-            reviews = int(m_comb.group(2).replace(",", ""))
+        if rating is None or reviews is None:
+            m_comb = re.search(r'aria-label="([\d.]+)\s*stars?\s*([\d,]+)\s*reviews?"', html, re.I)
+            if m_comb:
+                if rating is None: rating = float(m_comb.group(1))
+                if reviews is None: reviews = int(m_comb.group(2).replace(",", ""))
 
         # Method 2: Separate aria-label like '3.9 stars ' and '1,003 reviews'
         if rating is None:
@@ -109,7 +131,13 @@ def extract_gmb_data(page, brand="Bikanervala"):
             if m_rev:
                 reviews = int(m_rev.group(1).replace(",", ""))
 
-        # Method 3: Inner text pattern like '3.9\n(1,003)' or '4.2(765)'
+        # Method 3: Contextual search if rating found but reviews still None
+        if rating is not None and reviews is None and body_text:
+            m_p = re.search(re.escape(str(rating)) + r'[\s\S]{0,80}?\(([0-9,]+)\)', body_text)
+            if m_p:
+                reviews = int(m_p.group(1).replace(",", ""))
+
+        # Method 4: Inner text pattern like '3.9\n(1,003)' or '4.2(765)'
         if rating is None or reviews is None:
             m_txt = re.search(r'([\d.]+)\s*(?:stars?|★)?\s*\(([\d,]+)\)', html)
             if m_txt:
@@ -118,7 +146,7 @@ def extract_gmb_data(page, brand="Bikanervala"):
                 if reviews is None:
                     reviews = int(m_txt.group(2).replace(",", ""))
 
-        # Method 4: Check general stars & reviews in text
+        # Method 5: Check general stars & reviews in text
         if rating is None or reviews is None:
             m_txt2 = re.search(r'([\d.]+)\s*stars?.*?([\d,]+)\s*reviews?', html, re.I | re.DOTALL)
             if m_txt2:
@@ -127,7 +155,7 @@ def extract_gmb_data(page, brand="Bikanervala"):
                 if reviews is None:
                     reviews = int(m_txt2.group(2).replace(",", ""))
 
-        # Method 5: Check K format like '3.8K reviews' or '3.8 K'
+        # Method 6: Check K format like '3.8K reviews' or '3.8 K'
         if reviews is None:
             m_k = re.search(r'([\d.]+)\s*[Kk]\s*reviews?', html, re.I)
             if m_k:
@@ -154,16 +182,32 @@ def scrape_store(page, store_code, brand, address, direct_url=None, ignore_store
 
     cached_links = load_cached_links()
 
-    # In Comparison Sheet, ignore cluster store_code to prevent Haldiram/Om from copying Bikanervala
+    # Determine best URL: prioritize known place/share URLs over generic search URLs
     url = direct_url
-    if not url:
-        url = cached_links.get(clean_addr.lower())
-    if not url:
-        clean_norm = re.sub(r"\(.*?\)", "", clean_addr).strip().lower()
-        clean_norm = re.sub(r"\s+", " ", clean_norm)
-        url = cached_links.get(clean_norm)
-    if not url and not ignore_store_code and store_code and not str(store_code).startswith("#"):
-        url = cached_links.get(str(store_code).strip().upper())
+    is_generic_search = url and ("/search/" in url or "search?hl=" in url)
+
+    # Check cache if no URL or if current URL is only a generic search query
+    if not url or is_generic_search:
+        cached_url = cached_links.get(clean_addr.lower())
+        if not cached_url:
+            cached_url = cached_links.get(f"{brand} {clean_addr}".lower())
+        if not cached_url:
+            b_pfx = "hr" if "haldiram" in brand.lower() else ("bv" if "bikanervala" in brand.lower() else ("om" if "om" in brand.lower() else ""))
+            if b_pfx:
+                cached_url = cached_links.get(f"{b_pfx} {clean_addr}".lower())
+        if not cached_url:
+            clean_norm = re.sub(r"\(.*?\)", "", clean_addr).strip().lower()
+            clean_norm = re.sub(r"\s+", " ", clean_norm)
+            cached_url = cached_links.get(clean_norm)
+        if not cached_url and not ignore_store_code and store_code and not str(store_code).startswith("#") and "FS" not in str(store_code).upper():
+            cached_url = cached_links.get(str(store_code).strip().upper())
+        if cached_url:
+            url = cached_url
+
+    # Clean up duplicated query strings like 'Gurgaon Gurgaon' if still a search URL
+    if url and "google.com/maps/search/" in url:
+        url = re.sub(r'(?:Gurgaon|\+)+Gurgaon\?hl=en', '+Gurgaon?hl=en', url, flags=re.I)
+        url = url.replace('Gurgaon+++Gurgaon', 'Gurgaon').replace('Gurgaon++Gurgaon', 'Gurgaon').replace('Gurgaon+Gurgaon', 'Gurgaon')
 
     discovered_url = None
     rating, reviews = None, None
@@ -182,9 +226,11 @@ def scrape_store(page, store_code, brand, address, direct_url=None, ignore_store
     # Fallback to search query if not retrieved
     if rating is None or reviews is None:
         clean_name = re.sub(r"[,\-_/]+", " ", clean_addr).strip()
-        name_no_bv = re.sub(r"^bv\s+", "", clean_name, flags=re.I).strip()
-        q_brand = "" if brand.lower() in name_no_bv.lower() else f"{brand} "
-        search_query = urllib.parse.quote(f"{q_brand}{name_no_bv}")
+        name_no_bv = re.sub(r"^(?:bv|hr|om)\s+", "", clean_name, flags=re.I).strip()
+        # Remove trailing Gurgaon from name to prevent duplicate 'Gurgaon Gurgaon'
+        name_no_city = re.sub(r"\bGurgaon\b", "", name_no_bv, flags=re.I).strip()
+        q_brand = "" if brand.lower() in name_no_city.lower() else f"{brand} "
+        search_query = urllib.parse.quote(f"{q_brand}{name_no_city}, Gurgaon")
         search_url = f"https://www.google.com/maps/search/{search_query}?hl=en"
         try:
             page.goto(search_url, timeout=30000, wait_until="domcontentloaded")
@@ -209,7 +255,7 @@ def scrape_store(page, store_code, brand, address, direct_url=None, ignore_store
     # Save newly discovered link permanently under store name
     if discovered_url:
         cached_links[clean_addr.lower()] = discovered_url
-        if not ignore_store_code and store_code and not str(store_code).startswith("#"):
+        if not ignore_store_code and store_code and not str(store_code).startswith("#") and "FS" not in str(store_code).upper():
             cached_links[str(store_code).strip().upper()] = discovered_url
         save_cached_links(cached_links)
 
@@ -217,6 +263,7 @@ def scrape_store(page, store_code, brand, address, direct_url=None, ignore_store
     return {
         "store_code": store_code,
         "address": address,
+        "brand": brand,
         "rating": rating,
         "reviews": reviews,
         "status": status,
@@ -463,6 +510,7 @@ def update_dated_pair_sheet(ws, page, title, brand, name_col, code_col, start_ro
             res = {
                 "sno": sno,
                 "store_code": code or f"#{sno}",
+                "brand": store_brand,
                 "address": name,
                 "rating": "Closed",
                 "reviews": "Closed",
@@ -480,6 +528,29 @@ def update_dated_pair_sheet(ws, page, title, brand, name_col, code_col, start_ro
             res = scrape_store(page, code or f"#{sno}", store_brand, name, direct_url=row_link, ignore_store_code=ignore_code)
             res["sno"] = sno
             res["brand"] = store_brand
+
+            # Fallback for Google Maps "limited view" where reviews are hidden but rating is live
+            if res.get("rating") is not None and (res.get("reviews") is None or res.get("reviews") == ""):
+                for past_c in range(rev_col - 2, 5, -2):
+                    past_val = ws.cell(row=r, column=past_c).value
+                    if past_val is not None and str(past_val).strip() not in ["", "None", "Closed"]:
+                        try:
+                            res["reviews"] = int(float(str(past_val).replace(",", "")))
+                            print(f"  [Fallback] Retained latest review count: {res['reviews']}")
+                            break
+                        except ValueError:
+                            pass
+
+            if res.get("rating") is None:
+                for past_c in range(rate_col - 2, 5, -2):
+                    past_val = ws.cell(row=r, column=past_c).value
+                    if past_val is not None and str(past_val).strip() not in ["", "None", "Closed"]:
+                        try:
+                            res["rating"] = round(float(past_val), 1)
+                            print(f"  [Fallback] Retained latest rating: {res['rating']}")
+                            break
+                        except ValueError:
+                            pass
 
         results.append(res)
         all_results.append(res)
